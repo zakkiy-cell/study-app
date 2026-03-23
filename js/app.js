@@ -1,87 +1,60 @@
 'use strict';
 
-// ===== Storage Manager =====
-class StorageManager {
-  constructor() {
-    this.USERS_KEY  = 'studyApp_users';
-    this.EXAMS_KEY  = 'studyApp_exams';
-  }
+import { initializeApp }                                              from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut,
+         onAuthStateChanged }                                         from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
+import { getFirestore, doc, getDoc, setDoc, deleteDoc,
+         collection, getDocs }                                        from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
+import firebaseConfig from './firebase-config.js';
 
-  // ── User Management ───────────────────────────────
-  getUsers() {
-    try { return JSON.parse(localStorage.getItem(this.USERS_KEY) || '[]'); }
-    catch { return []; }
-  }
+// Initialize Firebase
+const fbApp = initializeApp(firebaseConfig);
+const auth  = getAuth(fbApp);
+const db    = getFirestore(fbApp);
 
-  addUser(name) {
-    const users = this.getUsers();
-    const user = { id: `user_${Date.now()}`, name: name.trim(), createdAt: new Date().toISOString() };
-    users.push(user);
-    localStorage.setItem(this.USERS_KEY, JSON.stringify(users));
-    return user;
-  }
-
-  deleteUser(userId) {
-    const users = this.getUsers().filter(u => u.id !== userId);
-    localStorage.setItem(this.USERS_KEY, JSON.stringify(users));
-    // Remove user stats
-    localStorage.removeItem(this._statsKey(userId));
-  }
+// ===== Firestore Manager =====
+class FirestoreManager {
 
   // ── Exam Library ──────────────────────────────────
-  getRegisteredExams() {
-    try { return JSON.parse(localStorage.getItem(this.EXAMS_KEY) || '[]'); }
-    catch { return []; }
+  async getRegisteredExams() {
+    const snap = await getDocs(collection(db, 'exams'));
+    return snap.docs.map(d => d.data());
   }
 
-  getExamById(examId) {
-    return this.getRegisteredExams().find(e => e.meta.id === examId) || null;
+  async getExamById(examId) {
+    const snap = await getDoc(doc(db, 'exams', examId));
+    return snap.exists() ? snap.data() : null;
   }
 
-  registerExam(data) {
-    const exams = this.getRegisteredExams();
-    const idx = exams.findIndex(e => e.meta.id === data.meta.id);
-    if (idx >= 0) exams[idx] = data; else exams.push(data);
-    localStorage.setItem(this.EXAMS_KEY, JSON.stringify(exams));
+  async registerExam(data) {
+    await setDoc(doc(db, 'exams', data.meta.id), data);
   }
 
-  deleteExam(examId) {
-    const exams = this.getRegisteredExams().filter(e => e.meta.id !== examId);
-    localStorage.setItem(this.EXAMS_KEY, JSON.stringify(exams));
+  async deleteExam(examId) {
+    await deleteDoc(doc(db, 'exams', examId));
   }
 
   // ── Per-User Stats ────────────────────────────────
-  _statsKey(userId) { return `studyApp_stats_${userId}`; }
-
-  _loadStats(userId) {
-    try { return JSON.parse(localStorage.getItem(this._statsKey(userId)) || '{}'); }
-    catch { return {}; }
+  async getExamStats(uid, examId) {
+    const snap = await getDoc(doc(db, 'users', uid, 'stats', examId));
+    return snap.exists() ? snap.data() : { questions: {}, sessions: [] };
   }
 
-  _saveStats(userId, data) {
-    localStorage.setItem(this._statsKey(userId), JSON.stringify(data));
-  }
+  async recordSessionResults(uid, examId, answers, session) {
+    const ref  = doc(db, 'users', uid, 'stats', examId);
+    const snap = await getDoc(ref);
+    const data = snap.exists() ? snap.data() : { questions: {}, sessions: [] };
 
-  getExamStats(userId, examId) {
-    const data = this._loadStats(userId);
-    return data[examId] || { questions: {}, sessions: [] };
-  }
+    // Update per-question stats
+    for (const a of answers) {
+      const key = String(a.questionId);
+      if (!data.questions[key]) data.questions[key] = { correct: 0, total: 0 };
+      data.questions[key].total++;
+      if (a.isCorrect) data.questions[key].correct++;
+    }
 
-  recordAnswer(userId, examId, questionId, isCorrect) {
-    const data = this._loadStats(userId);
-    if (!data[examId]) data[examId] = { questions: {}, sessions: [] };
-    const stats = data[examId].questions;
-    const key = String(questionId);
-    if (!stats[key]) stats[key] = { correct: 0, total: 0 };
-    stats[key].total++;
-    if (isCorrect) stats[key].correct++;
-    this._saveStats(userId, data);
-  }
-
-  recordSession(userId, examId, session) {
-    const data = this._loadStats(userId);
-    if (!data[examId]) data[examId] = { questions: {}, sessions: [] };
-    data[examId].sessions.push({
+    // Append session summary
+    data.sessions.push({
       date: new Date().toISOString(),
       mode: session.mode,
       score: session.score,
@@ -89,57 +62,40 @@ class StorageManager {
       total: session.total,
       durationSec: session.durationSec,
     });
-    if (data[examId].sessions.length > 50) {
-      data[examId].sessions = data[examId].sessions.slice(-50);
-    }
-    this._saveStats(userId, data);
+    if (data.sessions.length > 50) data.sessions = data.sessions.slice(-50);
+
+    await setDoc(ref, data);
   }
 
-  getWeakQuestionIds(userId, examId, threshold = 0.7) {
-    const stats = this.getExamStats(userId, examId);
+  async getWeakQuestionIds(uid, examId, threshold = 0.7) {
+    const stats = await this.getExamStats(uid, examId);
     return Object.entries(stats.questions)
       .filter(([, s]) => s.total > 0 && (s.correct / s.total) < threshold)
       .map(([id]) => id);
   }
 
-  clearExamStats(userId, examId) {
-    const data = this._loadStats(userId);
-    delete data[examId];
-    this._saveStats(userId, data);
-  }
-
-  // Total sessions across all exams for a user (for user card summary)
-  getTotalSessions(userId) {
-    const data = this._loadStats(userId);
-    return Object.values(data).reduce((sum, d) => sum + (d.sessions || []).length, 0);
-  }
-
-  getLastSessionDate(userId) {
-    const data = this._loadStats(userId);
-    const allDates = Object.values(data)
-      .flatMap(d => (d.sessions || []).map(s => s.date))
-      .sort();
-    return allDates.length > 0 ? allDates[allDates.length - 1] : null;
+  async clearExamStats(uid, examId) {
+    await deleteDoc(doc(db, 'users', uid, 'stats', examId));
   }
 }
 
 // ===== Quiz Session =====
 class QuizSession {
   constructor({ questions, mode, examId, timeLimit = null }) {
-    this.questions = questions;
-    this.mode = mode;
-    this.examId = examId;
+    this.questions    = questions;
+    this.mode         = mode;
+    this.examId       = examId;
     this.timeLimitSec = timeLimit ? timeLimit * 60 : null;
     this.currentIndex = 0;
-    this.answers = [];
-    this.startTime = Date.now();
-    this.answered = false;
+    this.answers      = [];
+    this.startTime    = Date.now();
+    this.answered     = false;
   }
 
-  get current() { return this.questions[this.currentIndex]; }
-  get total() { return this.questions.length; }
-  get isDone() { return this.currentIndex >= this.total; }
-  get elapsedSec() { return Math.floor((Date.now() - this.startTime) / 1000); }
+  get current()      { return this.questions[this.currentIndex]; }
+  get total()        { return this.questions.length; }
+  get isDone()       { return this.currentIndex >= this.total; }
+  get elapsedSec()   { return Math.floor((Date.now() - this.startTime) / 1000); }
   get remainingSec() {
     if (!this.timeLimitSec) return null;
     return Math.max(0, this.timeLimitSec - this.elapsedSec);
@@ -166,9 +122,9 @@ class QuizSession {
 
   getResults() {
     const correct = this.answers.filter(a => a.isCorrect).length;
-    const total = this.answers.length;
-    const score = total > 0 ? Math.round((correct / total) * 100) : 0;
-    const cats = {};
+    const total   = this.answers.length;
+    const score   = total > 0 ? Math.round((correct / total) * 100) : 0;
+    const cats    = {};
     for (const a of this.answers) {
       if (!cats[a.category]) cats[a.category] = { correct: 0, total: 0 };
       cats[a.category].total++;
@@ -192,19 +148,38 @@ class QuizSession {
 // ===== Main App =====
 class App {
   constructor() {
-    this.storage = new StorageManager();
-    this.currentUser = null;
-    this.exam = null;
-    this.session = null;
+    this.storage      = new FirestoreManager();
+    this.currentUser  = null;   // Firebase Auth User
+    this.exam         = null;
+    this._cachedExams = null;
+    this.session      = null;
     this.timerInterval = null;
-    this.lastResults = null;
+    this.lastResults  = null;
     this._init();
   }
 
   _init() {
     this._bindEvents();
-    this.showScreen('user');
-    this._renderUserScreen();
+
+    // loading-overlay is visible by default (HTML); hide after auth resolves
+    onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        this.currentUser = user;
+        this._updateUserIndicator();
+        try {
+          await this._renderLibrary();
+        } catch (e) {
+          console.error(e);
+          this._toast('データの読み込みに失敗しました');
+        }
+        this.showScreen('home');
+      } else {
+        this.currentUser = null;
+        this._updateUserIndicator();
+        this.showScreen('login');
+      }
+      document.getElementById('loading-overlay').classList.add('hidden');
+    });
   }
 
   // ── Screen Management ──────────────────────────────
@@ -224,48 +199,67 @@ class App {
       return;
     }
     indicator.style.display = '';
-    document.getElementById('current-user-name').textContent = this.currentUser.name;
-    document.getElementById('user-indicator-avatar').textContent =
-      this.currentUser.name.charAt(0).toUpperCase();
-    document.getElementById('user-indicator-avatar').style.background =
-      this._userColor(this.currentUser.id);
+    const name = this.currentUser.displayName || this.currentUser.email || 'User';
+    document.getElementById('current-user-name').textContent = name.split(' ')[0];
+
+    const avatar = document.getElementById('user-indicator-avatar');
+    if (this.currentUser.photoURL) {
+      avatar.innerHTML = `<img src="${this.currentUser.photoURL}" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover;display:block;">`;
+      avatar.style.background = 'none';
+    } else {
+      avatar.textContent = name.charAt(0).toUpperCase();
+      avatar.style.background = this._userColor(this.currentUser.uid);
+    }
   }
 
-  _userColor(userId) {
+  _userColor(uid) {
     const colors = ['#4F46E5','#7C3AED','#DB2777','#DC2626','#D97706','#059669','#0891B2','#1D4ED8'];
     let hash = 0;
-    for (const c of userId) hash = (hash * 31 + c.charCodeAt(0)) & 0xffffffff;
+    for (const c of uid) hash = (hash * 31 + c.charCodeAt(0)) & 0xffffffff;
     return colors[Math.abs(hash) % colors.length];
+  }
+
+  // ── Auth ────────────────────────────────────────────
+  async _signIn() {
+    try {
+      await signInWithPopup(auth, new GoogleAuthProvider());
+      // onAuthStateChanged handles the rest
+    } catch (e) {
+      if (e.code !== 'auth/popup-closed-by-user') {
+        this._toast('サインインに失敗しました');
+        console.error(e);
+      }
+    }
+  }
+
+  async _signOut() {
+    if (!confirm('サインアウトしますか？')) return;
+    await signOut(auth);
+    // onAuthStateChanged will show login screen
   }
 
   // ── Event Binding ──────────────────────────────────
   _bindEvents() {
-    // User screen
-    document.getElementById('btn-add-user').addEventListener('click', () => this._addUser());
-    document.getElementById('new-user-name').addEventListener('keydown', e => {
-      if (e.key === 'Enter') this._addUser();
-    });
-    document.getElementById('btn-switch-user').addEventListener('click', () => {
-      this.currentUser = null;
-      this._updateUserIndicator();
-      this._renderUserScreen();
-      this.showScreen('user');
-    });
+    // Login
+    document.getElementById('btn-google-signin').addEventListener('click', () => this._signIn());
+
+    // Header sign-out
+    document.getElementById('btn-signout').addEventListener('click', () => this._signOut());
 
     // Library
-    document.getElementById('btn-go-register').addEventListener('click', () => this._showRegister());
+    document.getElementById('btn-go-register').addEventListener('click',    () => this._showRegister());
     document.getElementById('btn-empty-register').addEventListener('click', () => this._showRegister());
 
     // Register screen
-    document.getElementById('btn-register-back').addEventListener('click', () => {
-      this._renderLibrary();
+    document.getElementById('btn-register-back').addEventListener('click', async () => {
+      await this._renderLibrary();
       this.showScreen('home');
     });
-    const regDrop = document.getElementById('register-drop-zone');
+    const regDrop  = document.getElementById('register-drop-zone');
     const regInput = document.getElementById('register-file-input');
-    regDrop.addEventListener('click', () => regInput.click());
-    regDrop.addEventListener('dragover', e => { e.preventDefault(); regDrop.classList.add('drag-over'); });
-    regDrop.addEventListener('dragleave', () => regDrop.classList.remove('drag-over'));
+    regDrop.addEventListener('click',     () => regInput.click());
+    regDrop.addEventListener('dragover',  e  => { e.preventDefault(); regDrop.classList.add('drag-over'); });
+    regDrop.addEventListener('dragleave', ()  => regDrop.classList.remove('drag-over'));
     regDrop.addEventListener('drop', e => {
       e.preventDefault();
       regDrop.classList.remove('drag-over');
@@ -279,14 +273,14 @@ class App {
     });
 
     // Exam screen
-    document.getElementById('btn-exam-back').addEventListener('click', () => {
-      this._renderLibrary();
+    document.getElementById('btn-exam-back').addEventListener('click', async () => {
+      await this._renderLibrary();
       this.showScreen('home');
     });
     document.getElementById('btn-exam-stats').addEventListener('click', () => this._showStats());
     document.getElementById('btn-study').addEventListener('click', () => this._startMode('study'));
-    document.getElementById('btn-weak').addEventListener('click', () => this._startMode('weak'));
-    document.getElementById('btn-mock').addEventListener('click', () => this._startMode('mock'));
+    document.getElementById('btn-weak').addEventListener('click',  () => this._startMode('weak'));
+    document.getElementById('btn-mock').addEventListener('click',  () => this._startMode('mock'));
 
     // Count preset buttons
     document.querySelectorAll('.count-btn').forEach(btn => {
@@ -308,135 +302,59 @@ class App {
     document.getElementById('btn-quit').addEventListener('click', () => this._quitQuiz());
 
     // Result
-    document.getElementById('btn-result-home').addEventListener('click', () => {
-      this._renderExamCard();
-      this._renderLibrary();
+    document.getElementById('btn-result-home').addEventListener('click', async () => {
+      await this._renderLibrary();
       this.showScreen('home');
     });
-    document.getElementById('btn-retry').addEventListener('click', () => this._retryMode());
+    document.getElementById('btn-retry').addEventListener('click',        () => this._startMode(this.session.mode));
     document.getElementById('btn-review-wrongs').addEventListener('click', () => this._reviewWrongs());
     document.getElementById('tab-wrong').addEventListener('click', () => this._showTab('wrong'));
-    document.getElementById('tab-all').addEventListener('click', () => this._showTab('all'));
+    document.getElementById('tab-all').addEventListener('click',   () => this._showTab('all'));
 
     // Stats
     document.getElementById('btn-reset-stats').addEventListener('click', () => this._resetStats());
-    document.getElementById('btn-stats-back').addEventListener('click', () => this.showScreen('exam'));
-  }
-
-  // ── User Screen ────────────────────────────────────
-  _renderUserScreen() {
-    const users = this.storage.getUsers();
-    const grid = document.getElementById('user-grid');
-    grid.innerHTML = '';
-
-    for (const user of users) {
-      const totalSessions = this.storage.getTotalSessions(user.id);
-      const lastDate = this.storage.getLastSessionDate(user.id);
-      const lastText = lastDate ? this._relativeDate(lastDate) : '未使用';
-      const color = this._userColor(user.id);
-      const initial = user.name.charAt(0).toUpperCase();
-
-      const card = document.createElement('div');
-      card.className = 'user-card';
-      card.innerHTML = `
-        <div class="user-card-avatar" style="background:${color}">${initial}</div>
-        <div class="user-card-info">
-          <div class="user-card-name">${user.name}</div>
-          <div class="user-card-meta">
-            ${totalSessions > 0 ? `📝 ${totalSessions}回受験` : '受験履歴なし'}
-            ${lastDate ? `・最終: ${lastText}` : ''}
-          </div>
-        </div>
-        <button class="user-delete-btn" data-id="${user.id}" title="削除">✕</button>
-      `;
-
-      // Click card body → select user
-      card.addEventListener('click', e => {
-        if (e.target.closest('.user-delete-btn')) return;
-        this._selectUser(user);
-      });
-
-      // Delete button
-      card.querySelector('.user-delete-btn').addEventListener('click', e => {
-        e.stopPropagation();
-        if (confirm(`「${user.name}」を削除しますか？\n学習履歴もすべて削除されます。`)) {
-          this.storage.deleteUser(user.id);
-          this._toast(`「${user.name}」を削除しました`);
-          this._renderUserScreen();
-        }
-      });
-
-      grid.appendChild(card);
-    }
-
-    // Show/hide welcome text based on user count
-    document.querySelector('.user-welcome p').textContent =
-      users.length > 0
-        ? 'ユーザーを選択するか、新しいユーザーを追加してください'
-        : '最初にユーザーを作成してください';
-  }
-
-  _addUser() {
-    const input = document.getElementById('new-user-name');
-    const name = input.value.trim();
-    if (!name) { this._toast('名前を入力してください'); input.focus(); return; }
-    if (name.length > 20) { this._toast('名前は20文字以内で入力してください'); return; }
-    const users = this.storage.getUsers();
-    if (users.some(u => u.name === name)) {
-      this._toast(`「${name}」はすでに登録されています`);
-      return;
-    }
-    const user = this.storage.addUser(name);
-    input.value = '';
-    this._toast(`「${user.name}」を追加しました`);
-    this._renderUserScreen();
-  }
-
-  _selectUser(user) {
-    this.currentUser = user;
-    this._updateUserIndicator();
-    this._renderLibrary();
-    this.showScreen('home');
-  }
-
-  _relativeDate(isoString) {
-    const diff = Date.now() - new Date(isoString).getTime();
-    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-    if (days === 0) return '今日';
-    if (days === 1) return '昨日';
-    if (days < 7) return `${days}日前`;
-    if (days < 30) return `${Math.floor(days / 7)}週間前`;
-    return `${Math.floor(days / 30)}ヶ月前`;
+    document.getElementById('btn-stats-back').addEventListener('click',  async () => {
+      await this._renderExamCard();
+      this.showScreen('exam');
+    });
   }
 
   // ── Library Screen ─────────────────────────────────
-  _renderLibrary() {
+  async _renderLibrary() {
     if (!this.currentUser) return;
-    const exams = this.storage.getRegisteredExams();
-    const grid = document.getElementById('library-grid');
-    const empty = document.getElementById('library-empty');
+    const uid = this.currentUser.uid;
 
+    const exams = await this.storage.getRegisteredExams();
+    this._cachedExams = exams;
+
+    const grid  = document.getElementById('library-grid');
+    const empty = document.getElementById('library-empty');
     grid.innerHTML = '';
 
     if (exams.length === 0) {
       empty.style.display = '';
-      grid.style.display = 'none';
+      grid.style.display  = 'none';
       return;
     }
 
     empty.style.display = 'none';
-    grid.style.display = '';
+    grid.style.display  = '';
 
-    for (const exam of exams) {
-      const stats = this.storage.getExamStats(this.currentUser.id, exam.meta.id);
+    // Load stats for all exams in parallel
+    const statsArr = await Promise.all(
+      exams.map(e => this.storage.getExamStats(uid, e.meta.id).catch(() => ({ questions: {}, sessions: [] })))
+    );
+
+    exams.forEach((exam, idx) => {
+      const stats    = statsArr[idx];
       const sessions = stats.sessions || [];
-      const qStats = stats.questions || {};
+      const qStats   = stats.questions || {};
       const answered = Object.values(qStats).filter(s => s.total > 0);
-      const avgAccuracy = answered.length > 0
+      const avgAcc   = answered.length > 0
         ? Math.round(answered.reduce((sum, s) => sum + s.correct / s.total, 0) / answered.length * 100)
         : null;
-      const weakCount = this.storage.getWeakQuestionIds(this.currentUser.id, exam.meta.id).length;
-      const accuracyClass = avgAccuracy === null ? '' : avgAccuracy >= 80 ? 'high' : avgAccuracy >= 60 ? 'mid' : 'low';
+      const weakCount    = Object.entries(qStats).filter(([, s]) => s.total > 0 && (s.correct / s.total) < 0.7).length;
+      const accuracyClass = avgAcc === null ? '' : avgAcc >= 80 ? 'high' : avgAcc >= 60 ? 'mid' : 'low';
 
       const card = document.createElement('div');
       card.className = 'library-card';
@@ -446,33 +364,42 @@ class App {
         <div class="library-card-badges">
           <span class="lib-badge">🗂 ${exam.questions.length}問</span>
           <span class="lib-badge">📝 ${sessions.length}回受験</span>
-          ${avgAccuracy !== null
-            ? `<span class="lib-badge accuracy-${accuracyClass}">✓ ${avgAccuracy}%</span>`
+          ${avgAcc !== null
+            ? `<span class="lib-badge accuracy-${accuracyClass}">✓ ${avgAcc}%</span>`
             : '<span class="lib-badge">未受験</span>'
           }
           ${weakCount > 0 ? `<span class="lib-badge weak">⚡ 苦手${weakCount}問</span>` : ''}
         </div>
-        <div class="library-card-arrow">→</div>
-      `;
+        <div class="library-card-arrow">→</div>`;
       card.addEventListener('click', () => this._selectExam(exam.meta.id));
       grid.appendChild(card);
-    }
+    });
   }
 
   // ── Register Screen ────────────────────────────────
-  _showRegister() {
-    this._renderRegisteredList();
+  async _showRegister() {
+    await this._renderRegisteredList();
     this.showScreen('register');
   }
 
-  _renderRegisteredList() {
-    const exams = this.storage.getRegisteredExams();
+  async _renderRegisteredList() {
     const list = document.getElementById('registered-list');
+    list.innerHTML = '<div class="empty-state" style="padding:24px"><p>読み込み中…</p></div>';
+
+    let exams;
+    try {
+      exams = await this.storage.getRegisteredExams();
+    } catch (e) {
+      list.innerHTML = '<div class="empty-state"><p>読み込みに失敗しました</p></div>';
+      return;
+    }
+
     list.innerHTML = '';
     if (exams.length === 0) {
       list.innerHTML = '<div class="empty-state" style="padding:24px"><p>登録された問題集がありません</p></div>';
       return;
     }
+
     for (const exam of exams) {
       const item = document.createElement('div');
       item.className = 'registered-item';
@@ -481,73 +408,79 @@ class App {
           <div class="registered-item-name">${exam.meta.name}</div>
           <div class="registered-item-meta">${exam.questions.length}問 / ID: ${exam.meta.id}</div>
         </div>
-        <button class="btn btn-danger btn-sm">削除</button>
-      `;
-      item.querySelector('button').addEventListener('click', () => {
+        <button class="btn btn-danger btn-sm">削除</button>`;
+      item.querySelector('button').addEventListener('click', async () => {
         if (confirm(`「${exam.meta.name}」を削除しますか？`)) {
-          this.storage.deleteExam(exam.meta.id);
-          this._toast(`「${exam.meta.name}」を削除しました`);
-          this._renderRegisteredList();
+          try {
+            await this.storage.deleteExam(exam.meta.id);
+            this._cachedExams = null;
+            this._toast(`「${exam.meta.name}」を削除しました`);
+            await this._renderRegisteredList();
+          } catch (e) {
+            this._toast('削除に失敗しました');
+          }
         }
       });
       list.appendChild(item);
     }
   }
 
-  _registerFile(file) {
+  async _registerFile(file) {
     const reader = new FileReader();
-    reader.onload = e => {
+    reader.onload = async (e) => {
       try {
         const data = JSON.parse(e.target.result);
         if (!data.meta || !data.meta.id || !Array.isArray(data.questions)) {
           this._toast('不正なJSONフォーマットです（meta.id と questions 配列が必要）');
           return;
         }
-        this.storage.registerExam(data);
+        await this.storage.registerExam(data);
+        this._cachedExams = null;
         this._toast(`「${data.meta.name}」を登録しました（${data.questions.length}問）`);
-        this._renderRegisteredList();
-      } catch {
-        this._toast('JSONの解析に失敗しました');
+        await this._renderRegisteredList();
+      } catch (e) {
+        if (e instanceof SyntaxError) this._toast('JSONの解析に失敗しました');
+        else { this._toast('登録に失敗しました'); console.error(e); }
       }
     };
     reader.readAsText(file, 'UTF-8');
   }
 
   // ── Exam Detail Screen ─────────────────────────────
-  _selectExam(examId) {
-    const examData = this.storage.getExamById(examId);
+  async _selectExam(examId) {
+    const examData = this._cachedExams?.find(e => e.meta.id === examId)
+      || await this.storage.getExamById(examId);
     if (!examData) { this._toast('問題集が見つかりません'); return; }
     this.exam = examData;
-    this._renderExamCard();
+    await this._renderExamCard();
     this._resetCountSelector();
     this.showScreen('exam');
   }
 
-  _renderExamCard() {
+  async _renderExamCard() {
     if (!this.exam || !this.currentUser) return;
     const { meta, questions } = this.exam;
-    const uid = this.currentUser.id;
-    const stats = this.storage.getExamStats(uid, meta.id);
+    const uid    = this.currentUser.uid;
+    const stats  = await this.storage.getExamStats(uid, meta.id);
     const sessions = stats.sessions || [];
-    const qStats = stats.questions || {};
+    const qStats   = stats.questions || {};
     const answered = Object.values(qStats).filter(s => s.total > 0);
-    const avgAccuracy = answered.length > 0
+    const avgAcc   = answered.length > 0
       ? Math.round(answered.reduce((sum, s) => sum + s.correct / s.total, 0) / answered.length * 100)
       : '--';
 
-    document.getElementById('exam-name').textContent = meta.name;
-    document.getElementById('exam-desc').textContent = meta.description || '';
+    document.getElementById('exam-name').textContent   = meta.name;
+    document.getElementById('exam-desc').textContent   = meta.description || '';
     document.getElementById('exam-q-count').textContent = `${questions.length}問`;
-    document.getElementById('exam-time').textContent = meta.timeLimit ? `${meta.timeLimit}分` : '無制限';
+    document.getElementById('exam-time').textContent   = meta.timeLimit ? `${meta.timeLimit}分` : '無制限';
     document.getElementById('stat-sessions').textContent = sessions.length;
-    document.getElementById('stat-accuracy').textContent = avgAccuracy === '--' ? '--' : `${avgAccuracy}%`;
+    document.getElementById('stat-accuracy').textContent = avgAcc === '--' ? '--' : `${avgAcc}%`;
 
-    const weakIds = this.storage.getWeakQuestionIds(uid, meta.id);
+    const weakIds = Object.entries(qStats)
+      .filter(([, s]) => s.total > 0 && (s.correct / s.total) < 0.7).map(([id]) => id);
     document.getElementById('stat-weak').textContent = weakIds.length;
     document.getElementById('weak-mode-desc').textContent =
-      weakIds.length === 0
-        ? '（学習後に利用できます）'
-        : `正答率70%未満の${weakIds.length}問を集中練習`;
+      weakIds.length === 0 ? '（学習後に利用できます）' : `正答率70%未満の${weakIds.length}問を集中練習`;
   }
 
   _resetCountSelector() {
@@ -558,14 +491,14 @@ class App {
   }
 
   // ── Start Mode ─────────────────────────────────────
-  _startMode(mode) {
+  async _startMode(mode) {
     if (!this.exam || !this.currentUser) return;
     const { meta, questions } = this.exam;
-    const uid = this.currentUser.id;
+    const uid = this.currentUser.uid;
     let quizQuestions = [...questions];
 
     if (mode === 'weak') {
-      const weakIds = this.storage.getWeakQuestionIds(uid, meta.id);
+      const weakIds = await this.storage.getWeakQuestionIds(uid, meta.id);
       if (weakIds.length === 0) {
         this._toast('苦手問題がありません。まず学習モードで解いてください');
         return;
@@ -576,11 +509,8 @@ class App {
     quizQuestions = this._shuffle(quizQuestions);
 
     const limitVal = parseInt(document.getElementById('q-count-input').value, 10);
-    if (limitVal > 0 && limitVal < quizQuestions.length) {
-      quizQuestions = quizQuestions.slice(0, limitVal);
-    }
+    if (limitVal > 0 && limitVal < quizQuestions.length) quizQuestions = quizQuestions.slice(0, limitVal);
 
-    // Shuffle choices for each question
     quizQuestions = quizQuestions.map(q => this._shuffleChoices(q));
 
     this.session = new QuizSession({
@@ -634,9 +564,9 @@ class App {
   }
 
   _renderTimer() {
-    const sec = this.session.remainingSec;
-    const min = Math.floor(sec / 60);
-    const s = sec % 60;
+    const sec  = this.session.remainingSec;
+    const min  = Math.floor(sec / 60);
+    const s    = sec % 60;
     document.getElementById('timer-display').textContent =
       `${String(min).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
     const wrap = document.getElementById('timer-wrap');
@@ -652,11 +582,11 @@ class App {
 
     document.getElementById('progress-fill').style.width = `${Math.round((sess.currentIndex / sess.total) * 100)}%`;
     document.getElementById('progress-text').textContent = `${sess.currentIndex + 1} / ${sess.total}`;
-    document.getElementById('q-category').textContent = q.category || '';
-    document.getElementById('q-text').textContent = q.question;
+    document.getElementById('q-category').textContent    = q.category || '';
+    document.getElementById('q-text').textContent        = q.question;
 
-    const choiceLabels = ['A', 'B', 'C', 'D'];
-    const choiceWrap = document.getElementById('choices-wrap');
+    const choiceLabels = ['A','B','C','D'];
+    const choiceWrap   = document.getElementById('choices-wrap');
     choiceWrap.innerHTML = '';
     q.choices.forEach((text, i) => {
       const btn = document.createElement('button');
@@ -666,7 +596,7 @@ class App {
       choiceWrap.appendChild(btn);
     });
 
-    document.getElementById('feedback').className = 'feedback';
+    document.getElementById('feedback').className    = 'feedback';
     document.getElementById('feedback').style.display = 'none';
     document.getElementById('btn-next').style.display = 'none';
   }
@@ -674,9 +604,8 @@ class App {
   _selectChoice(index) {
     if (this.session.answered) return;
     const isCorrect = this.session.submitAnswer(index);
-    this.storage.recordAnswer(this.currentUser.id, this.exam.meta.id, this.session.current.id, isCorrect);
 
-    const buttons = document.querySelectorAll('.choice-btn');
+    const buttons      = document.querySelectorAll('.choice-btn');
     const correctIndex = this.session.current.answer;
     buttons.forEach((btn, i) => {
       btn.disabled = true;
@@ -685,11 +614,11 @@ class App {
     });
 
     if (this.session.mode !== 'mock') {
-      const q = this.session.current;
+      const q  = this.session.current;
       const fb = document.getElementById('feedback');
       fb.style.display = '';
       fb.className = `feedback show ${isCorrect ? 'correct-fb' : 'incorrect-fb'}`;
-      document.getElementById('fb-title').textContent = isCorrect ? '✓ 正解！' : '✗ 不正解';
+      document.getElementById('fb-title').textContent       = isCorrect ? '✓ 正解！' : '✗ 不正解';
       document.getElementById('fb-explanation').textContent = q.explanation || '';
     }
 
@@ -703,18 +632,31 @@ class App {
     if (this.session.isDone) this._finishQuiz(); else this._renderQuestion();
   }
 
-  _quitQuiz() {
+  async _quitQuiz() {
     if (!confirm('試験を中断しますか？（解答済みの進捗は保存されています）')) return;
     clearInterval(this.timerInterval);
-    if (this.session.answers.length > 0) this._finishQuiz(); else this.showScreen('exam');
+    if (this.session.answers.length > 0) await this._finishQuiz(); else this.showScreen('exam');
   }
 
   // ── Results ────────────────────────────────────────
-  _finishQuiz() {
+  async _finishQuiz() {
     clearInterval(this.timerInterval);
-    const results = this.session.getResults();
+    const results   = this.session.getResults();
     this.lastResults = results;
-    this.storage.recordSession(this.currentUser.id, this.exam.meta.id, results);
+
+    try {
+      await this.storage.recordSessionResults(
+        this.currentUser.uid,
+        this.exam.meta.id,
+        results.answers,
+        { mode: results.mode, score: results.score, correct: results.correct,
+          total: results.total, durationSec: results.durationSec }
+      );
+    } catch (e) {
+      console.error('Failed to save results:', e);
+      this._toast('結果の保存に失敗しました');
+    }
+
     this._renderResults(results);
     this.showScreen('result');
   }
@@ -722,12 +664,12 @@ class App {
   _renderResults(results) {
     const { score, correct, total, categories, wrongAnswers } = results;
 
-    document.getElementById('result-score').textContent = `${score}%`;
+    document.getElementById('result-score').textContent  = `${score}%`;
     document.getElementById('result-detail').textContent = `${correct} / ${total} 問正解`;
 
     const passEl = document.getElementById('pass-badge');
     passEl.textContent = score >= 70 ? '合格ライン達成！' : '合格ラインまで頑張ろう';
-    passEl.className = `pass-badge ${score >= 70 ? 'pass' : 'fail'}`;
+    passEl.className   = `pass-badge ${score >= 70 ? 'pass' : 'fail'}`;
 
     const min = Math.floor(results.durationSec / 60);
     const sec = results.durationSec % 60;
@@ -773,7 +715,7 @@ class App {
       list.innerHTML = '<div class="empty-state"><div class="empty-icon">🎉</div><p>間違えた問題はありません</p></div>';
       return;
     }
-    const choiceLabels = ['A', 'B', 'C', 'D'];
+    const choiceLabels = ['A','B','C','D'];
     for (const a of answers) {
       const el = document.createElement('div');
       el.className = `review-item ${a.isCorrect ? 'right' : 'wrong'}`;
@@ -792,32 +734,30 @@ class App {
     }
   }
 
-  _retryMode() { this._startMode(this.session.mode); }
-
   _reviewWrongs() {
     if (!this.lastResults || this.lastResults.wrongAnswers.length === 0) return;
     const wrongIds = new Set(this.lastResults.wrongAnswers.map(a => String(a.questionId)));
-    const originalQuestions = this.exam.questions.filter(q => wrongIds.has(String(q.id)));
-    const questions = this._shuffle(originalQuestions).map(q => this._shuffleChoices(q));
+    const originals = this.exam.questions.filter(q => wrongIds.has(String(q.id)));
+    const questions = this._shuffle(originals).map(q => this._shuffleChoices(q));
     this.session = new QuizSession({ questions, mode: 'study', examId: this.exam.meta.id });
     this._startQuiz();
   }
 
   // ── Stats Screen ───────────────────────────────────
-  _showStats() {
+  async _showStats() {
     if (!this.exam || !this.currentUser) return;
-    const uid = this.currentUser.id;
-    const stats = this.storage.getExamStats(uid, this.exam.meta.id);
+    const uid   = this.currentUser.uid;
+    const stats = await this.storage.getExamStats(uid, this.exam.meta.id);
 
     document.getElementById('stats-exam-name').textContent = this.exam.meta.name;
 
     const list = document.getElementById('q-stats-list');
     list.innerHTML = '';
     for (const q of this.exam.questions) {
-      const s = stats.questions[String(q.id)];
-      const total = s ? s.total : 0;
+      const s       = stats.questions[String(q.id)];
+      const total   = s ? s.total : 0;
       const correct = s ? s.correct : 0;
-      const pct = total > 0 ? Math.round((correct / total) * 100) : null;
+      const pct     = total > 0 ? Math.round((correct / total) * 100) : null;
       const pctClass = pct === null ? '' : pct >= 80 ? 'high' : pct >= 60 ? 'mid' : 'low';
       const el = document.createElement('div');
       el.className = 'q-stat-item';
@@ -829,7 +769,7 @@ class App {
       list.appendChild(el);
     }
 
-    const sessions = stats.sessions || [];
+    const sessions    = stats.sessions || [];
     const sessionList = document.getElementById('session-list');
     sessionList.innerHTML = '';
     if (sessions.length === 0) {
@@ -854,13 +794,17 @@ class App {
     this.showScreen('stats');
   }
 
-  _resetStats() {
+  async _resetStats() {
     if (!this.exam || !this.currentUser) return;
     if (!confirm('この試験の学習データをすべてリセットしますか？')) return;
-    this.storage.clearExamStats(this.currentUser.id, this.exam.meta.id);
-    this._toast('学習データをリセットしました');
-    this._renderExamCard();
-    this._showStats();
+    try {
+      await this.storage.clearExamStats(this.currentUser.uid, this.exam.meta.id);
+      this._toast('学習データをリセットしました');
+      await this._renderExamCard();
+      await this._showStats();
+    } catch (e) {
+      this._toast('リセットに失敗しました');
+    }
   }
 
   // ── Toast ──────────────────────────────────────────
