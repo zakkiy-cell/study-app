@@ -26,8 +26,8 @@ class FirestoreManager {
     return snap.exists() ? snap.data() : null;
   }
 
-  async registerExam(data) {
-    await setDoc(doc(db, 'exams', data.meta.id), data);
+  async registerExam(uid, data) {
+    await setDoc(doc(db, 'exams', data.meta.id), { ...data, _ownerId: uid });
   }
 
   async deleteExam(examId) {
@@ -362,8 +362,8 @@ class App {
       const card = document.createElement('div');
       card.className = 'library-card';
       card.innerHTML = `
-        <div class="library-card-name">${exam.meta.name}</div>
-        <div class="library-card-desc">${exam.meta.description || '説明なし'}</div>
+        <div class="library-card-name">${this._h(exam.meta.name)}</div>
+        <div class="library-card-desc">${this._h(exam.meta.description || '説明なし')}</div>
         <div class="library-card-badges">
           <span class="lib-badge">🗂 ${exam.questions.length}問</span>
           <span class="lib-badge">📝 ${sessions.length}回受験</span>
@@ -408,8 +408,8 @@ class App {
       item.className = 'registered-item';
       item.innerHTML = `
         <div class="registered-item-info">
-          <div class="registered-item-name">${exam.meta.name}</div>
-          <div class="registered-item-meta">${exam.questions.length}問 / ID: ${exam.meta.id}</div>
+          <div class="registered-item-name">${this._h(exam.meta.name)}</div>
+          <div class="registered-item-meta">${exam.questions.length}問 / ID: ${this._h(exam.meta.id)}</div>
         </div>
         <button class="btn btn-outline btn-sm btn-excel-export">⬇ Excel</button>
         <button class="btn btn-danger btn-sm btn-delete">削除</button>`;
@@ -443,7 +443,7 @@ class App {
           this._toast('不正なJSONフォーマットです（meta.id と questions 配列が必要）');
           return;
         }
-        await this.storage.registerExam(data);
+        await this.storage.registerExam(this.currentUser.uid, data);
         this._cachedExams = null;
         this._toast(`「${data.meta.name}」を登録しました（${data.questions.length}問）`);
         await this._renderRegisteredList();
@@ -500,7 +500,7 @@ class App {
 
       if (questions.length === 0) { this._toast('questionsシートに問題がありません'); return; }
 
-      await this.storage.registerExam({ meta, questions });
+      await this.storage.registerExam(this.currentUser.uid, { meta, questions });
       this._cachedExams = null;
       this._toast(`「${meta.name}」を登録しました（${questions.length}問）`);
       await this._renderRegisteredList();
@@ -724,7 +724,7 @@ class App {
     q.choices.forEach((text, i) => {
       const btn = document.createElement('button');
       btn.className = 'choice-btn';
-      btn.innerHTML = `<span class="choice-label">${choiceLabels[i]}</span><span>${text}</span>`;
+      btn.innerHTML = `<span class="choice-label">${choiceLabels[i]}</span><span>${this._h(text)}</span>`;
       btn.addEventListener('click', () => this._selectChoice(i));
       choiceWrap.appendChild(btn);
     });
@@ -814,7 +814,7 @@ class App {
       const colorClass = c.pct >= 80 ? 'high' : c.pct >= 60 ? 'mid' : 'low';
       catList.innerHTML += `
         <div class="category-item">
-          <span class="category-name">${c.name}</span>
+          <span class="category-name">${this._h(c.name)}</span>
           <div class="category-bar-wrap">
             <div class="category-bar-fill ${colorClass}" style="width:${c.pct}%"></div>
           </div>
@@ -854,15 +854,15 @@ class App {
       el.className = `review-item ${a.isCorrect ? 'right' : 'wrong'}`;
       el.innerHTML = `
         <div class="review-item-header">
-          <span class="tag tag-category">${a.category}</span>
+          <span class="tag tag-category">${this._h(a.category)}</span>
           <span class="tag ${a.isCorrect ? 'tag-right' : 'tag-wrong'}">${a.isCorrect ? '正解' : '不正解'}</span>
         </div>
-        <div class="review-q">${a.question}</div>
+        <div class="review-q">${this._h(a.question)}</div>
         <div class="review-answer">
-          あなたの回答: ${choiceLabels[a.selectedAnswer]}. ${a.choices[a.selectedAnswer]}<br>
-          ${!a.isCorrect ? `正解: ${choiceLabels[a.correctAnswer]}. ${a.choices[a.correctAnswer]}` : ''}
+          あなたの回答: ${choiceLabels[a.selectedAnswer]}. ${this._h(a.choices[a.selectedAnswer])}<br>
+          ${!a.isCorrect ? `正解: ${choiceLabels[a.correctAnswer]}. ${this._h(a.choices[a.correctAnswer])}` : ''}
         </div>
-        <div class="review-explanation">${a.explanation || ''}</div>`;
+        <div class="review-explanation">${this._h(a.explanation || '')}</div>`;
       list.appendChild(el);
     }
   }
@@ -896,9 +896,10 @@ class App {
       el.className = 'q-stat-item';
       el.innerHTML = `
         <span class="q-stat-id">#${q.id}</span>
-        <span class="q-stat-q">${q.question.slice(0, 40)}${q.question.length > 40 ? '…' : ''}</span>
+        <span class="q-stat-q">${this._h(q.question.slice(0, 40))}${q.question.length > 40 ? '…' : ''}</span>
         <span class="q-stat-accuracy ${pctClass}">${pct === null ? '--' : pct + '%'}</span>
         <span class="q-stat-attempts">${total}回</span>`;
+
       list.appendChild(el);
     }
 
@@ -918,7 +919,7 @@ class App {
         el.className = 'q-stat-item';
         el.innerHTML = `
           <span class="q-stat-id">${dateStr}</span>
-          <span class="q-stat-q">${modeLabels[s.mode] || s.mode}</span>
+          <span class="q-stat-q">${modeLabels[s.mode] || this._h(s.mode)}</span>
           <span class="q-stat-accuracy ${pctClass}">${pct}%</span>
           <span class="q-stat-attempts">${s.correct ?? '?'}/${s.total}</span>`;
         sessionList.appendChild(el);
@@ -938,6 +939,16 @@ class App {
     } catch (e) {
       this._toast('リセットに失敗しました');
     }
+  }
+
+  // ── HTML Escape ────────────────────────────────────
+  _h(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#x27;');
   }
 
   // ── Toast ──────────────────────────────────────────
