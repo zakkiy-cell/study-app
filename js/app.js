@@ -264,8 +264,8 @@ class App {
       e.preventDefault();
       regDrop.classList.remove('drag-over');
       const file = e.dataTransfer.files[0];
-      if (file && file.name.endsWith('.json')) this._registerFile(file);
-      else this._toast('JSONファイルをドロップしてください');
+      if (file && (file.name.endsWith('.json') || file.name.endsWith('.xlsx'))) this._registerFile(file);
+      else this._toast('JSON または Excel（.xlsx）ファイルをドロップしてください');
     });
     regInput.addEventListener('change', e => {
       if (e.target.files[0]) this._registerFile(e.target.files[0]);
@@ -310,6 +310,9 @@ class App {
     document.getElementById('btn-review-wrongs').addEventListener('click', () => this._reviewWrongs());
     document.getElementById('tab-wrong').addEventListener('click', () => this._showTab('wrong'));
     document.getElementById('tab-all').addEventListener('click',   () => this._showTab('all'));
+
+    // Excel template download
+    document.getElementById('btn-download-template').addEventListener('click', () => this._downloadExcelTemplate());
 
     // Stats
     document.getElementById('btn-reset-stats').addEventListener('click', () => this._resetStats());
@@ -408,8 +411,10 @@ class App {
           <div class="registered-item-name">${exam.meta.name}</div>
           <div class="registered-item-meta">${exam.questions.length}問 / ID: ${exam.meta.id}</div>
         </div>
-        <button class="btn btn-danger btn-sm">削除</button>`;
-      item.querySelector('button').addEventListener('click', async () => {
+        <button class="btn btn-outline btn-sm btn-excel-export">⬇ Excel</button>
+        <button class="btn btn-danger btn-sm btn-delete">削除</button>`;
+      item.querySelector('.btn-excel-export').addEventListener('click', () => this._exportToExcel(exam));
+      item.querySelector('.btn-delete').addEventListener('click', async () => {
         if (confirm(`「${exam.meta.name}」を削除しますか？`)) {
           try {
             await this.storage.deleteExam(exam.meta.id);
@@ -426,6 +431,10 @@ class App {
   }
 
   async _registerFile(file) {
+    if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+      await this._importExcel(file);
+      return;
+    }
     const reader = new FileReader();
     reader.onload = async (e) => {
       try {
@@ -444,6 +453,130 @@ class App {
       }
     };
     reader.readAsText(file, 'UTF-8');
+  }
+
+  // ── Excel Import ───────────────────────────────────
+  async _importExcel(file) {
+    const XLSX = window.XLSX;
+    if (!XLSX) { this._toast('Excel機能の読み込みに失敗しました'); return; }
+    try {
+      const buf  = await file.arrayBuffer();
+      const wb   = XLSX.read(buf, { type: 'array' });
+
+      // meta sheet
+      const metaSheet = wb.Sheets['meta'];
+      if (!metaSheet) { this._toast('"meta" シートが見つかりません'); return; }
+      const metaRows = XLSX.utils.sheet_to_json(metaSheet);
+      if (metaRows.length === 0) { this._toast('metaシートにデータがありません'); return; }
+      const mr   = metaRows[0];
+      const meta = {
+        id:          String(mr.id          || '').trim(),
+        name:        String(mr.name        || '').trim(),
+        description: String(mr.description || '').trim(),
+        timeLimit:   mr.timeLimit ? Number(mr.timeLimit) : null,
+        version:     String(mr.version     || '1.0.0').trim(),
+      };
+      if (!meta.id) { this._toast('metaシートの id が空です'); return; }
+
+      // questions sheet
+      const qSheet = wb.Sheets['questions'];
+      if (!qSheet) { this._toast('"questions" シートが見つかりません'); return; }
+      const answerMap = { A: 0, B: 1, C: 2, D: 3 };
+      const questions = XLSX.utils.sheet_to_json(qSheet)
+        .filter(r => r.question)
+        .map((r, i) => ({
+          id:          Number(r.id) || (i + 1),
+          category:    String(r.category    || '').trim(),
+          question:    String(r.question    || '').trim(),
+          choices:     [
+            String(r.choiceA || '').trim(),
+            String(r.choiceB || '').trim(),
+            String(r.choiceC || '').trim(),
+            String(r.choiceD || '').trim(),
+          ],
+          answer:      answerMap[String(r.answer || 'A').toUpperCase().trim()] ?? 0,
+          explanation: String(r.explanation || '').trim(),
+        }));
+
+      if (questions.length === 0) { this._toast('questionsシートに問題がありません'); return; }
+
+      await this.storage.registerExam({ meta, questions });
+      this._cachedExams = null;
+      this._toast(`「${meta.name}」を登録しました（${questions.length}問）`);
+      await this._renderRegisteredList();
+    } catch (e) {
+      this._toast('Excelの読み込みに失敗しました');
+      console.error(e);
+    }
+  }
+
+  // ── Excel Export ───────────────────────────────────
+  _exportToExcel(exam) {
+    const XLSX = window.XLSX;
+    if (!XLSX) { this._toast('Excel機能の読み込みに失敗しました'); return; }
+    const { meta, questions } = exam;
+    const wb = XLSX.utils.book_new();
+
+    // meta sheet
+    XLSX.utils.book_append_sheet(wb,
+      XLSX.utils.json_to_sheet([{
+        id: meta.id, name: meta.name,
+        description: meta.description || '',
+        timeLimit: meta.timeLimit || '',
+        version: meta.version || '1.0.0',
+      }]),
+      'meta'
+    );
+
+    // questions sheet
+    const letters = ['A', 'B', 'C', 'D'];
+    XLSX.utils.book_append_sheet(wb,
+      XLSX.utils.json_to_sheet(questions.map(q => ({
+        id:          q.id,
+        category:    q.category,
+        question:    q.question,
+        choiceA:     q.choices[0] || '',
+        choiceB:     q.choices[1] || '',
+        choiceC:     q.choices[2] || '',
+        choiceD:     q.choices[3] || '',
+        answer:      letters[q.answer] || 'A',
+        explanation: q.explanation || '',
+      }))),
+      'questions'
+    );
+
+    XLSX.writeFile(wb, `${meta.id}.xlsx`);
+    this._toast(`「${meta.name}」をExcelでダウンロードしました`);
+  }
+
+  // ── Excel Template Download ────────────────────────
+  _downloadExcelTemplate() {
+    const XLSX = window.XLSX;
+    if (!XLSX) { this._toast('Excel機能の読み込みに失敗しました'); return; }
+    const wb = XLSX.utils.book_new();
+
+    XLSX.utils.book_append_sheet(wb,
+      XLSX.utils.json_to_sheet([{
+        id: 'my_exam', name: '問題集名', description: '問題集の説明',
+        timeLimit: 60, version: '1.0.0',
+      }]),
+      'meta'
+    );
+
+    XLSX.utils.book_append_sheet(wb,
+      XLSX.utils.json_to_sheet([
+        { id: 1, category: 'カテゴリ名', question: '問題文をここに入力',
+          choiceA: '選択肢A', choiceB: '選択肢B', choiceC: '選択肢C', choiceD: '選択肢D',
+          answer: 'A', explanation: '解説文をここに入力' },
+        { id: 2, category: 'カテゴリ名', question: '2問目の問題文',
+          choiceA: '選択肢A', choiceB: '選択肢B', choiceC: '選択肢C', choiceD: '選択肢D',
+          answer: 'B', explanation: '解説文' },
+      ]),
+      'questions'
+    );
+
+    XLSX.writeFile(wb, 'question_template.xlsx');
+    this._toast('テンプレートをダウンロードしました');
   }
 
   // ── Exam Detail Screen ─────────────────────────────
